@@ -1,94 +1,101 @@
 import streamlit as st
+import pandas as pd
+import numpy as np
 import requests
-import time
+import datetime
+from io import StringIO
 
-# Function for intro screen
-def intro_screen():
-    st.title("Altcoin Beta Dashboard")
-    st.markdown("""
-        ### Welcome to the **Altcoin Beta Calculator**!
-        This app allows you to calculate how much an altcoin will move based on BTC's movement using **beta** and **volatility** metrics.
-        
-        - Select an altcoin from the dropdown
-        - View its beta value vs BTC
-        - Input BTC's % movement to see how the altcoin will react!
-        
-        Built with Streamlit, powered by the CoinGecko API.
-    """)
+# ------------------- UI CONFIG ------------------- #
+st.set_page_config(
+    page_title="Altcoin Beta & Volatility Multiplier Dashboard",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# Function to toggle light/dark mode
-def toggle_theme():
-    theme = st.radio("Choose your theme", ("Light", "Dark"), index=1)
+st.markdown("""
+    <style>
+    body { background-color: #0e1117; color: white; }
+    .stApp { background-color: #0e1117; }
+    .css-1d391kg { background-color: #0e1117; }
+    </style>
+""", unsafe_allow_html=True)
 
-    if theme == "Dark":
-        st.markdown("""
-            <style>
-            body {
-                background-color: #1e1e1e;
-                color: white;
-            }
-            </style>
-        """, unsafe_allow_html=True)
+st.title("📈 Altcoin Sensitivity Dashboard")
+st.markdown("Compare how strongly altcoins react to BTC movements using **Beta** or your custom **Volatility Multiplier** model.")
+
+# ------------------- API SETUP ------------------- #
+COINGECKO_API = "https://api.coingecko.com/api/v3"
+
+@st.cache_data(ttl=3600)
+def get_all_coins():
+    url = f"{COINGECKO_API}/coins/list"
+    r = requests.get(url)
+    return pd.DataFrame(r.json())
+
+@st.cache_data(ttl=3600)
+def get_coin_market_chart(coin_id, days=30):
+    url = f"{COINGECKO_API}/coins/{coin_id}/market_chart?vs_currency=usd&days={days}&interval=daily"
+    r = requests.get(url)
+    prices = r.json().get("prices", [])
+    df = pd.DataFrame(prices, columns=['timestamp', 'price'])
+    df['price'] = df['price'].astype(float)
+    return df['price']
+
+# ------------------- CALCULATIONS ------------------- #
+def calculate_beta(btc_returns, alt_returns):
+    covariance = np.cov(alt_returns, btc_returns)[0][1]
+    btc_variance = np.var(btc_returns)
+    return covariance / btc_variance if btc_variance != 0 else 0
+
+def calculate_volatility_multiplier(btc_returns, alt_returns):
+    return np.std(alt_returns) / np.std(btc_returns) if np.std(btc_returns) != 0 else 0
+
+@st.cache_data(ttl=1800)
+def calculate_coin_sensitivity(coin_id, mode="Beta"):
+    btc_prices = get_coin_market_chart("bitcoin")
+    alt_prices = get_coin_market_chart(coin_id)
+    if len(btc_prices) != len(alt_prices):
+        min_len = min(len(btc_prices), len(alt_prices))
+        btc_prices = btc_prices[-min_len:]
+        alt_prices = alt_prices[-min_len:]
+
+    btc_returns = np.log(btc_prices / btc_prices.shift(1)).dropna()
+    alt_returns = np.log(alt_prices / alt_prices.shift(1)).dropna()
+
+    if mode == "Beta":
+        return round(calculate_beta(btc_returns, alt_returns), 3)
     else:
-        st.markdown("""
-            <style>
-            body {
-                background-color: #f5f5f5;
-                color: black;
-            }
-            </style>
-        """, unsafe_allow_html=True)
+        return round(calculate_volatility_multiplier(btc_returns, alt_returns), 3)
 
-# Function to fetch coin data (using @st.cache_data)
-@st.cache_data
-def fetch_coin_data():
-    url = "https://api.coingecko.com/api/v3/coins/markets"
-    params = {"vs_currency": "usd", "order": "market_cap_desc", "per_page": 250}
-    response = requests.get(url, params=params)
-    return response.json()
+# ------------------- SIDEBAR ------------------- #
+all_coins = get_all_coins()
 
-# Auto-refresh function
-def auto_refresh():
-    st.write("Last refreshed: ", time.strftime("%Y-%m-%d %H:%M:%S"))
-    st.button("Refresh", key="refresh")
+mode = st.sidebar.radio("Choose Calculation Mode:", ["Beta", "Volatility Multiplier"])
+search = st.sidebar.text_input("🔍 Search for a coin (e.g., solana)").lower()
 
-# Function for tracking user interactions
-def track_interactions():
-    if 'refresh_count' not in st.session_state:
-        st.session_state.refresh_count = 0
-    
-    if st.button("Refresh"):
-        st.session_state.refresh_count += 1
-        st.write(f"Refresh clicked {st.session_state.refresh_count} times!")
+filtered_coins = all_coins[all_coins['name'].str.contains(search, case=False) | all_coins['symbol'].str.contains(search, case=False)]
 
-# Main Function
-def main():
-    # Show Intro screen once
-    if 'intro_shown' not in st.session_state:
-        intro_screen()
-        st.session_state.intro_shown = True
-    
-    # Toggle theme
-    toggle_theme()
-    
-    # Fetch Coin Data
-    coin_data = fetch_coin_data()
-    
-    # Search Bar for coins
-    coin_search = st.text_input("Search for a coin:")
-    filtered_coins = [coin for coin in coin_data if coin_search.lower() in coin['name'].lower()]
-    
-    if filtered_coins:
-        st.write("Filtered Results: ", filtered_coins)
-    else:
-        st.write("No coins found. Please refine your search.")
-    
-    # Auto-refresh
-    auto_refresh()
+selected_coin = st.sidebar.selectbox("Select Coin:", filtered_coins['id'].tolist())
 
-    # Track refresh button interactions
-    track_interactions()
+sensitivity = calculate_coin_sensitivity(selected_coin, mode)
 
-# Run the app
-if __name__ == "__main__":
-    main()
+st.metric(label=f"{selected_coin.capitalize()} {mode}", value=sensitivity)
+
+# ------------------- CALCULATOR ------------------- #
+btc_move = st.number_input("📌 Enter BTC % Move (e.g. 5 for 5%)", value=1.0)
+alt_move = btc_move * sensitivity
+st.success(f"Estimated {selected_coin.upper()} move: {round(alt_move, 2)}% based on {mode}")
+
+# ------------------- OPTIONAL CSV EXPORT ------------------- #
+if st.sidebar.button("📤 Export Sensitivity Data"):
+    coin_ids = filtered_coins['id'].tolist()
+    export_data = []
+    for coin in coin_ids:
+        try:
+            sens = calculate_coin_sensitivity(coin, mode)
+            export_data.append((coin, sens))
+        except:
+            continue
+    df_export = pd.DataFrame(export_data, columns=["Coin", f"{mode}"])
+    csv = df_export.to_csv(index=False)
+    st.sidebar.download_button("Download CSV", csv, file_name=f"altcoin_{mode.lower()}_data.csv")
