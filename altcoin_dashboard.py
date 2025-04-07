@@ -39,8 +39,8 @@ def toggle_theme():
             </style>
         """, unsafe_allow_html=True)
 
-# Function to fetch coin data
-@st.cache
+# Function to fetch coin data (using @st.cache_data)
+@st.cache_data
 def fetch_coin_data():
     url = "https://api.coingecko.com/api/v3/coins/markets"
     params = {"vs_currency": "usd", "order": "market_cap_desc", "per_page": 250}
